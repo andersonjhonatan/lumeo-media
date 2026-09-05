@@ -22,46 +22,60 @@ type Analysis = {
   label: string;
   message: string;
   canProcess: boolean;
-  canPreview?: boolean;
   title?: string;
   thumbnail?: string | null;
   canonicalUrl?: string;
-  embedUrl?: string;
-  spotifyId?: string;
   directUrl?: string;
   tracks?: Track[];
-  trackCount?: number;
+};
+
+type Alternative = {
+  kind: 'store' | 'search';
+  provider: string;
+  url: string;
+  label: string;
+  price?: number;
+  currency?: string;
+  confidence?: number;
 };
 
 type SourceResult = {
   id: string;
   available: boolean;
   provider?: string | null;
-  candidateTitle?: string;
-  candidateArtist?: string;
   license?: string;
   downloadUrl?: string;
   itemUrl?: string;
-  fileName?: string;
   actualFormat?: string;
   size?: number | null;
   confidence?: number;
   message?: string;
+  checkedProviders?: string[];
+  alternatives?: Alternative[];
 };
 
 const features = [
-  { icon: ListMusic, title: 'Playlist em lote', text: 'Importe metadados públicos, selecione músicas e processe a lista por lotes.' },
-  { icon: Search, title: 'Busca de fontes abertas', text: 'O LUMEO procura fontes públicas/licenciadas e só libera download quando encontra uma fonte verificável.' },
-  { icon: AudioLines, title: 'Formatos de áudio', text: 'Defina o formato preferido para a busca e para os fluxos de conversão autorizados.' },
-  { icon: Download, title: 'Downloads organizados', text: 'Baixe fontes disponíveis individualmente ou exporte uma lista M3U com os links encontrados.' },
-  { icon: ShieldCheck, title: 'Sem rip de plataforma', text: 'Spotify e YouTube servem como referência de metadados; o áudio protegido não é extraído.' },
-  { icon: WandSparkles, title: 'Experiência premium', text: 'Mobile-first, rápida e clara, com estados de busca, disponibilidade e progresso.' },
+  { icon: ListMusic, title: 'Playlist em lote', text: 'Importe a lista, selecione faixas e pesquise várias fontes em lotes.' },
+  { icon: Search, title: 'Busca em múltiplas fontes', text: 'Internet Archive, Jamendo quando configurado, Apple/iTunes e atalhos de busca em catálogos legais.' },
+  { icon: AudioLines, title: 'Download quando liberado', text: 'Se a fonte permitir download, o botão aparece diretamente na faixa.' },
+  { icon: Download, title: 'Fallback legal', text: 'Quando não existe download grátis, o LUMEO procura loja ou catálogo oficial para você não ficar sem resultado.' },
+  { icon: ShieldCheck, title: 'Correspondência mais segura', text: 'Título e artista são comparados antes de liberar um candidato para reduzir arquivos errados.' },
+  { icon: WandSparkles, title: 'Arquitetura expansível', text: 'Novos provedores podem ser adicionados ao mesmo pipeline sem refazer a interface.' },
 ];
 
 function prettyBytes(value?: number | null) {
   if (!value || Number.isNaN(value)) return '';
   if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function priceLabel(option: Alternative) {
+  if (typeof option.price !== 'number') return option.label;
+  try {
+    return `${option.label} · ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: option.currency || 'BRL' }).format(option.price)}`;
+  } catch {
+    return `${option.label} · ${option.price} ${option.currency || ''}`;
+  }
 }
 
 export default function Home() {
@@ -103,6 +117,8 @@ export default function Home() {
       const data = await res.json();
       setAnalysis(data);
       if (Array.isArray(data?.tracks)) setSelectedIds(data.tracks.map((track: Track) => track.id));
+    } catch {
+      setSourceMessage('Não foi possível analisar este link.');
     } finally {
       setLoading(false);
     }
@@ -219,9 +235,9 @@ export default function Home() {
         </nav>
 
         <section className="hero" id="analisar">
-          <span className="eyebrow"><Sparkles size={13}/> Playlist, mídia e fontes abertas</span>
+          <span className="eyebrow"><Sparkles size={13}/> Busca ampliada de mídia</span>
           <h1>Mídia, <span>do seu jeito.</span></h1>
-          <p>Cole uma playlist, selecione as faixas e deixe o LUMEO procurar fontes realmente baixáveis e licenciadas — sem extrair o áudio protegido da plataforma.</p>
+          <p>Cole uma playlist e o LUMEO procura primeiro downloads liberados e depois opções oficiais de compra ou catálogo para cada faixa.</p>
 
           <div className="converter">
             <div className="converter-inner">
@@ -231,8 +247,8 @@ export default function Home() {
               </div>
               <div className="platform-row">
                 <span className="platform-pill"><Music2 size={12}/> Spotify</span>
-                <span className="platform-pill"><Film size={12}/> YouTube</span>
-                <span className="platform-pill"><Link2 size={12}/> URL direta</span>
+                <span className="platform-pill"><Search size={12}/> Fontes abertas</span>
+                <span className="platform-pill"><ExternalLink size={12}/> Lojas/catálogos</span>
                 <span className="platform-pill"><Upload size={12}/> Upload</span>
               </div>
 
@@ -241,7 +257,7 @@ export default function Home() {
                   <div className="playlist-head">
                     {analysis.thumbnail ? <img className="playlist-cover" src={analysis.thumbnail} alt="Capa da playlist" /> : <div className="playlist-cover playlist-fallback"><Music2/></div>}
                     <div className="playlist-meta">
-                      <span className="playlist-kicker">PLAYLIST · SPOTIFY · METADADOS PÚBLICOS</span>
+                      <span className="playlist-kicker">PLAYLIST · BUSCA MULTIFONTE</span>
                       <h2>{analysis.title || 'Playlist'}</h2>
                       <p>{tracks.length} faixas encontradas · {selectedIds.length} selecionadas</p>
                       {analysis.canonicalUrl && <a href={analysis.canonicalUrl} target="_blank" rel="noreferrer">Abrir playlist original <ExternalLink size={13}/></a>}
@@ -250,14 +266,8 @@ export default function Home() {
                   </div>
 
                   <div className="download-controls">
-                    <div className="control-group">
-                      <span>Formato preferido</span>
-                      <div className="segmented">{['mp3','m4a','wav'].map(item => <button key={item} onClick={()=>setFormat(item)} className={format===item?'active':''}>{item.toUpperCase()}</button>)}</div>
-                    </div>
-                    <div className="control-group">
-                      <span>Qualidade desejada</span>
-                      <div className="segmented">{['128','192','320'].map(item => <button key={item} onClick={()=>setQuality(item)} className={quality===item?'active':''}>{item}k</button>)}</div>
-                    </div>
+                    <div className="control-group"><span>Formato preferido</span><div className="segmented">{['mp3','m4a','wav'].map(item => <button key={item} onClick={()=>setFormat(item)} className={format===item?'active':''}>{item.toUpperCase()}</button>)}</div></div>
+                    <div className="control-group"><span>Qualidade desejada</span><div className="segmented">{['128','192','320'].map(item => <button key={item} onClick={()=>setQuality(item)} className={quality===item?'active':''}>{item}k</button>)}</div></div>
                     <button className="select-all" onClick={toggleAll}><Check size={15}/>{selectedIds.length === tracks.length ? 'Desmarcar todas' : 'Selecionar todas'}</button>
                   </div>
 
@@ -266,6 +276,7 @@ export default function Home() {
                       const selected = selectedIds.includes(track.id);
                       const result = sourceResults[track.id];
                       const resolving = resolvingIds.includes(track.id);
+                      const alternatives = result?.alternatives ?? [];
                       return (
                         <div className={`track-row ${selected ? 'selected' : ''}`} key={track.id}>
                           <button className={`track-check ${selected ? 'checked' : ''}`} onClick={()=>toggleTrack(track.id)} aria-label={selected ? 'Desmarcar faixa' : 'Selecionar faixa'}>{selected && <Check size={13}/>}</button>
@@ -273,50 +284,54 @@ export default function Home() {
                           <div className="track-main"><strong>{track.title}{track.explicit && <small>E</small>}</strong><span>{track.artist}</span></div>
                           <span className="track-duration">{track.duration}</span>
                           <div className="track-source">
-                            {resolving && <span className="source-searching"><LoaderCircle className="spin" size={13}/> procurando</span>}
+                            {resolving && <span className="source-searching"><LoaderCircle className="spin" size={13}/> procurando em várias fontes</span>}
                             {!resolving && result?.available && <>
-                              <span className="source-ok">Fonte aberta · {result.actualFormat?.toUpperCase()}</span>
+                              <span className="source-ok">Download liberado · {result.actualFormat?.toUpperCase()}</span>
                               <span className="source-sub">{result.provider}{result.size ? ` · ${prettyBytes(result.size)}` : ''}{typeof result.confidence === 'number' ? ` · ${result.confidence}% match` : ''}</span>
                             </>}
-                            {!resolving && result && !result.available && <span className="source-none">Sem fonte aberta encontrada</span>}
+                            {!resolving && result && !result.available && <>
+                              <span className="source-none">Sem download grátis liberado</span>
+                              {result.checkedProviders?.length ? <span className="source-sub">Verificado: {result.checkedProviders.join(' · ')}</span> : null}
+                            </>}
                             {!resolving && !result && <span className="source-idle">Ainda não pesquisada</span>}
                           </div>
                           <div className="track-actions">
-                            {result?.available && result.itemUrl && <a className="mini-btn" href={result.itemUrl} target="_blank" rel="noreferrer" title="Ver licença e origem"><ExternalLink size={13}/></a>}
-                            {result?.available && result.downloadUrl && <a className="mini-btn download" href={result.downloadUrl} target="_blank" rel="noreferrer" title="Baixar da fonte"><Download size={13}/></a>}
+                            {result?.available && result.itemUrl && <a className="mini-btn" href={result.itemUrl} target="_blank" rel="noreferrer" title="Ver origem"><ExternalLink size={13}/></a>}
+                            {result?.available && result.downloadUrl && <a className="mini-btn download" href={result.downloadUrl} target="_blank" rel="noreferrer" title="Baixar"><Download size={13}/></a>}
                           </div>
+                          {!resolving && alternatives.length > 0 && (
+                            <div className="legal-options">
+                              {alternatives.slice(0, 3).map((option, index) => (
+                                <a key={`${option.provider}-${index}`} href={option.url} target="_blank" rel="noreferrer" className="legal-option">
+                                  <ExternalLink size={12}/><span>{priceLabel(option)}</span><small>{option.provider}</small>
+                                </a>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
                   </div>
 
                   <div className="playlist-actions-bar">
-                    <div><strong>{selectedTracks.length}</strong><span> selecionadas</span>{Object.keys(sourceResults).length > 0 && <><b> · </b><strong>{availableSelected.length}</strong><span> com fonte aberta</span></>}</div>
+                    <div><strong>{selectedTracks.length}</strong><span> selecionadas</span>{Object.keys(sourceResults).length > 0 && <><b> · </b><strong>{availableSelected.length}</strong><span> com download liberado</span></>}</div>
                     <div className="bar-actions">
                       {availableSelected.length > 0 && <button className="secondary-btn" onClick={exportM3U}><FileDown size={15}/> Exportar M3U</button>}
                       {availableSelected.length > 0 && <button className="secondary-btn" onClick={downloadAvailable}><Download size={15}/> Baixar disponíveis</button>}
-                      <button className="primary-btn find-btn" onClick={findSources} disabled={!selectedTracks.length || resolvingIds.length > 0}>{resolvingIds.length > 0 ? <><LoaderCircle className="spin" size={15}/> Procurando...</> : <><Search size={15}/> Procurar fontes</>}</button>
+                      <button className="primary-btn find-btn" onClick={findSources} disabled={!selectedTracks.length || resolvingIds.length > 0}>{resolvingIds.length > 0 ? <><LoaderCircle className="spin" size={15}/> Procurando...</> : <><Search size={15}/> Pesquisa ampliada</>}</button>
                     </div>
                   </div>
                   {sourceMessage && <p className="source-message">{sourceMessage}</p>}
-                  <div className="legal-note"><ShieldCheck size={15}/><span>O Spotify é usado apenas para identificar a playlist e suas faixas. Downloads só aparecem quando uma fonte externa com licença aberta/pública é encontrada.</span></div>
+                  <div className="legal-note"><ShieldCheck size={15}/><span>O LUMEO procura downloads apenas onde a própria fonte permite. Quando isso não existe, mostra opções oficiais de compra ou pesquisa em catálogos legais.</span></div>
                 </div>
               )}
 
               {analysis && analysis.source === 'direct' && analysis.directUrl && (
-                <div className="direct-result">
-                  <div className="thumb"><Link2/></div>
-                  <div><h3>{analysis.label}</h3><p>{analysis.message}</p></div>
-                  <a className="secondary-btn" href={analysis.directUrl} target="_blank" rel="noreferrer"><Download size={14}/> Abrir mídia</a>
-                </div>
+                <div className="direct-result"><div className="thumb"><Link2/></div><div><h3>{analysis.label}</h3><p>{analysis.message}</p></div><a className="secondary-btn" href={analysis.directUrl} target="_blank" rel="noreferrer"><Download size={14}/> Abrir mídia</a></div>
               )}
 
               {analysis && !spotifyPlaylist && analysis.source !== 'direct' && (
-                <div className="result">
-                  <div className="thumb">{analysis.source === 'spotify' ? <Music2/> : <Film/>}</div>
-                  <div><h3>{analysis.label}</h3><p>{analysis.message}</p></div>
-                  <span className="status">{analysis.canProcess ? 'Processável' : 'Análise'}</span>
-                </div>
+                <div className="result"><div className="thumb">{analysis.source === 'spotify' ? <Music2/> : <Film/>}</div><div><h3>{analysis.label}</h3><p>{analysis.message}</p></div><span className="status">{analysis.canProcess ? 'Processável' : 'Análise'}</span></div>
               )}
             </div>
           </div>
@@ -324,7 +339,7 @@ export default function Home() {
       </div>
 
       <section className="section" id="recursos"><div className="shell">
-        <div className="section-head"><h2>Um fluxo de download que sabe dizer “não disponível”.</h2><p>Em vez de fingir que qualquer faixa pode ser baixada, o LUMEO separa metadados da plataforma de arquivos realmente liberados por outras fontes.</p></div>
+        <div className="section-head"><h2>Mais cobertura sem fingir que todo arquivo é grátis.</h2><p>O pipeline prioriza download liberado. Se não houver, ele procura uma opção oficial para a mesma gravação.</p></div>
         <div className="grid">{features.map(({icon:Icon,title,text})=><article className="card" key={title}><div className="icon-box"><Icon size={20}/></div><h3>{title}</h3><p>{text}</p></article>)}</div>
       </div></section>
 
@@ -335,21 +350,17 @@ export default function Home() {
             <div className="upload-circle"><CloudUpload/></div><h3>Solte sua mídia aqui</h3><p>MP4, MOV, WEBM, MP3, WAV, M4A e outros arquivos autorizados.</p>
             <input ref={fileInput} type="file" hidden accept="audio/*,video/*" onChange={e=>setFile(e.target.files?.[0] ?? null)} />
             <button className="ghost-btn" onClick={()=>fileInput.current?.click()}>{file ? file.name : 'Escolher arquivo'}</button>
-            {file && <div className="upload-options">
-              <div className="format-picker">{['mp3','m4a','wav','mp4','webm'].map(item=><button key={item} className={format===item ? 'format active' : 'format'} onClick={()=>setFormat(item)}>{item.toUpperCase()}</button>)}</div>
-              <button className="primary-btn convert-btn" onClick={convertFile} disabled={converting}>{converting ? <><LoaderCircle className="spin" size={15}/> Convertendo...</> : `Converter para ${format.toUpperCase()}`}</button>
-              {convertMessage && <p className="convert-message">{convertMessage}</p>}
-            </div>}
+            {file && <div className="upload-options"><div className="format-picker">{['mp3','m4a','wav','mp4','webm'].map(item=><button key={item} className={format===item ? 'format active' : 'format'} onClick={()=>setFormat(item)}>{item.toUpperCase()}</button>)}</div><button className="primary-btn convert-btn" onClick={convertFile} disabled={converting}>{converting ? <><LoaderCircle className="spin" size={15}/> Convertendo...</> : `Converter para ${format.toUpperCase()}`}</button>{convertMessage && <p className="convert-message">{convertMessage}</p>}</div>}
           </div></div>
-          <div className="history"><h3>Como o LUMEO decide</h3>
-            <div className="job"><div className="job-icon"><Music2 size={18}/></div><div><strong>Spotify / playlists</strong><span>metadados públicos → busca externa</span></div><span>01</span></div>
-            <div className="job"><div className="job-icon"><Search size={18}/></div><div><strong>Fonte aberta encontrada</strong><span>licença + arquivo verificável</span></div><CheckCircle2 size={18}/></div>
-            <div className="job"><div className="job-icon"><ShieldCheck size={18}/></div><div><strong>Sem fonte aberta</strong><span>download permanece indisponível</span></div><span>—</span></div>
+          <div className="history"><h3>Ordem da pesquisa</h3>
+            <div className="job"><div className="job-icon"><Download size={18}/></div><div><strong>Download liberado</strong><span>Internet Archive / Jamendo configurado</span></div><span>01</span></div>
+            <div className="job"><div className="job-icon"><ExternalLink size={18}/></div><div><strong>Loja oficial</strong><span>Apple / iTunes quando houver match</span></div><span>02</span></div>
+            <div className="job"><div className="job-icon"><Search size={18}/></div><div><strong>Catálogos adicionais</strong><span>Bandcamp / SoundCloud para pesquisa</span></div><span>03</span></div>
           </div>
         </div>
       </div></section>
 
-      <div className="shell"><footer className="footer" id="sobre"><span>© 2026 LUMEO · mídia organizada com transparência.</span><span>Downloads somente de fontes externas autorizadas ou arquivos do usuário.</span></footer></div>
+      <div className="shell"><footer className="footer" id="sobre"><span>© 2026 LUMEO · busca multifonte de mídia.</span><span>Downloads somente quando a fonte permite; demais casos apontam para opções oficiais.</span></footer></div>
     </main>
   );
 }
