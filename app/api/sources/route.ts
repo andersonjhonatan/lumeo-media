@@ -26,7 +26,8 @@ type ArchiveFile = {
 
 function lucene(value: string) {
   return value
-    .replace(/[\\+\-!(){}\[\]^"~*?:/]/g, ' ')
+    .replace(/[+\-!(){}\[\]^"~*?:]/g, ' ')
+    .replace(/\//g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 140);
