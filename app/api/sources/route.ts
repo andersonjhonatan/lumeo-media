@@ -24,6 +24,16 @@ type ArchiveFile = {
   size?: string;
 };
 
+type Alternative = {
+  kind: 'store' | 'search';
+  provider: string;
+  url: string;
+  label: string;
+  price?: number;
+  currency?: string;
+  confidence?: number;
+};
+
 function lucene(value: string) {
   return value
     .replace(/[+\-!(){}\[\]^"~*?:]/g, ' ')
@@ -49,6 +59,12 @@ function similar(a: string, b: string) {
   let hit = 0;
   aa.forEach(word => { if (bb.has(word)) hit += 1; });
   return hit / Math.max(aa.size, bb.size);
+}
+
+function scoreTrack(title: string, artist: string, candidateTitle: string, candidateArtist: string) {
+  const titleScore = similar(title, candidateTitle);
+  const artistScore = candidateArtist ? similar(artist, candidateArtist) : 0;
+  return Math.round(((titleScore * 0.75) + (artistScore * 0.25)) * 100);
 }
 
 function isOpenLicense(value: unknown) {
@@ -78,9 +94,9 @@ function chooseAudioFile(files: ArchiveFile[], preferred: string) {
   return preferredMatch || usable.find(file => String(file.source ?? '').toLowerCase() === 'original') || usable[0] || null;
 }
 
-async function archiveSearch(title: string, artist: string) {
-  const titleQ = lucene(title);
-  const artistQ = lucene(artist.split(',')[0] || artist);
+async function archiveDownload(track: RequestedTrack, preferred: string) {
+  const titleQ = lucene(track.title);
+  const artistQ = lucene(track.artist.split(',')[0] || track.artist);
   const queries = [
     `mediatype:audio AND title:("${titleQ}") AND creator:("${artistQ}")`,
     `mediatype:audio AND title:("${titleQ}")`,
@@ -100,70 +116,189 @@ async function archiveSearch(title: string, artist: string) {
       endpoint.searchParams.set('output', 'json');
 
       const response = await fetch(endpoint, {
-        headers: { Accept: 'application/json', 'User-Agent': 'LUMEO/1.0' },
+        headers: { Accept: 'application/json', 'User-Agent': 'LUMEO/1.1' },
         cache: 'no-store',
       });
       if (!response.ok) continue;
       const data = await response.json();
       const docs = Array.isArray(data?.response?.docs) ? data.response.docs as ArchiveDoc[] : [];
-      if (docs.length) return docs;
+
+      for (const doc of docs) {
+        if (!doc.identifier) continue;
+        const creator = Array.isArray(doc.creator) ? doc.creator.join(', ') : String(doc.creator ?? '');
+        const confidence = scoreTrack(track.title, track.artist, String(doc.title ?? ''), creator);
+        if (confidence < 65) continue;
+
+        const metaResponse = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`, {
+          headers: { Accept: 'application/json', 'User-Agent': 'LUMEO/1.1' },
+          cache: 'no-store',
+        });
+        if (!metaResponse.ok) continue;
+        const meta = await metaResponse.json();
+        const license = meta?.metadata?.licenseurl || meta?.metadata?.rights || doc.licenseurl || doc.rights || '';
+        if (!isOpenLicense(license)) continue;
+
+        const files = Array.isArray(meta?.files) ? meta.files as ArchiveFile[] : [];
+        const selected = chooseAudioFile(files, preferred);
+        if (!selected?.name) continue;
+
+        const safeName = selected.name.split('/').map(part => encodeURIComponent(part)).join('/');
+        return {
+          available: true,
+          provider: 'Internet Archive',
+          candidateTitle: String(meta?.metadata?.title || doc.title || track.title),
+          candidateArtist: String(meta?.metadata?.creator || creator || ''),
+          license: String(license),
+          downloadUrl: `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${safeName}`,
+          itemUrl: `https://archive.org/details/${encodeURIComponent(doc.identifier)}`,
+          fileName: selected.name,
+          actualFormat: fileFormat(selected.name),
+          size: selected.size ? Number(selected.size) : null,
+          confidence,
+        };
+      }
     } catch {
-      // tenta a próxima consulta
+      // tenta a próxima consulta/provedor
     }
   }
 
-  return [] as ArchiveDoc[];
+  return null;
+}
+
+async function jamendoDownload(track: RequestedTrack, preferred: string) {
+  const clientId = process.env.JAMENDO_CLIENT_ID;
+  if (!clientId) return null;
+
+  try {
+    const endpoint = new URL('https://api.jamendo.com/v3.0/tracks/');
+    endpoint.searchParams.set('client_id', clientId);
+    endpoint.searchParams.set('format', 'json');
+    endpoint.searchParams.set('limit', '10');
+    endpoint.searchParams.set('search', `${track.title} ${track.artist}`);
+    endpoint.searchParams.set('audiodlformat', preferred === 'wav' ? 'flac' : 'mp32');
+
+    const response = await fetch(endpoint, { cache: 'no-store' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const candidates = Array.isArray(data?.results) ? data.results : [];
+
+    let best: any = null;
+    let bestScore = 0;
+    for (const item of candidates) {
+      if (item?.audiodownload_allowed !== true || !item?.audiodownload) continue;
+      const confidence = scoreTrack(track.title, track.artist, String(item?.name ?? ''), String(item?.artist_name ?? ''));
+      if (confidence > bestScore) {
+        best = item;
+        bestScore = confidence;
+      }
+    }
+
+    if (!best || bestScore < 72) return null;
+    return {
+      available: true,
+      provider: 'Jamendo',
+      candidateTitle: String(best.name ?? track.title),
+      candidateArtist: String(best.artist_name ?? track.artist),
+      license: String(best.license_ccurl ?? 'Licença informada pelo Jamendo'),
+      downloadUrl: String(best.audiodownload),
+      itemUrl: String(best.shareurl || best.shorturl || best.audio || ''),
+      fileName: `${String(best.artist_name || track.artist)} - ${String(best.name || track.title)}.${preferred === 'wav' ? 'flac' : 'mp3'}`,
+      actualFormat: preferred === 'wav' ? 'flac' : 'mp3',
+      size: null,
+      confidence: bestScore,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function itunesAlternative(track: RequestedTrack): Promise<Alternative | null> {
+  try {
+    const endpoint = new URL('https://itunes.apple.com/search');
+    endpoint.searchParams.set('term', `${track.title} ${track.artist}`);
+    endpoint.searchParams.set('country', 'BR');
+    endpoint.searchParams.set('media', 'music');
+    endpoint.searchParams.set('entity', 'song');
+    endpoint.searchParams.set('limit', '5');
+
+    const response = await fetch(endpoint, { cache: 'no-store' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
+
+    let best: any = null;
+    let bestScore = 0;
+    for (const item of results) {
+      const confidence = scoreTrack(track.title, track.artist, String(item?.trackName ?? ''), String(item?.artistName ?? ''));
+      if (confidence > bestScore) {
+        best = item;
+        bestScore = confidence;
+      }
+    }
+
+    if (!best?.trackViewUrl || bestScore < 70) return null;
+    return {
+      kind: 'store',
+      provider: 'Apple / iTunes',
+      url: String(best.trackViewUrl),
+      label: typeof best.trackPrice === 'number' ? 'Comprar faixa' : 'Abrir na loja',
+      price: typeof best.trackPrice === 'number' ? best.trackPrice : undefined,
+      currency: typeof best.currency === 'string' ? best.currency : undefined,
+      confidence: bestScore,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function legalSearchAlternatives(track: RequestedTrack): Alternative[] {
+  const q = encodeURIComponent(`${track.artist} ${track.title}`);
+  return [
+    { kind: 'search', provider: 'Bandcamp', url: `https://bandcamp.com/search?q=${q}`, label: 'Pesquisar no Bandcamp' },
+    { kind: 'search', provider: 'SoundCloud', url: `https://soundcloud.com/search/sounds?q=${q}`, label: 'Pesquisar no SoundCloud' },
+  ];
 }
 
 async function resolveOne(track: RequestedTrack, preferred: string) {
-  const docs = await archiveSearch(track.title, track.artist);
+  const checkedProviders = ['Internet Archive'];
 
-  for (const doc of docs) {
-    if (!doc.identifier) continue;
-    const titleScore = similar(track.title, String(doc.title ?? ''));
-    const creator = Array.isArray(doc.creator) ? doc.creator.join(', ') : String(doc.creator ?? '');
-    const artistScore = creator ? similar(track.artist, creator) : 0;
-    if (titleScore < 0.5) continue;
-
-    try {
-      const metaResponse = await fetch(`https://archive.org/metadata/${encodeURIComponent(doc.identifier)}`, {
-        headers: { Accept: 'application/json', 'User-Agent': 'LUMEO/1.0' },
-        cache: 'no-store',
-      });
-      if (!metaResponse.ok) continue;
-      const meta = await metaResponse.json();
-      const license = meta?.metadata?.licenseurl || meta?.metadata?.rights || doc.licenseurl || doc.rights || '';
-      if (!isOpenLicense(license)) continue;
-
-      const files = Array.isArray(meta?.files) ? meta.files as ArchiveFile[] : [];
-      const selected = chooseAudioFile(files, preferred);
-      if (!selected?.name) continue;
-
-      const safeName = selected.name.split('/').map(part => encodeURIComponent(part)).join('/');
-      return {
-        id: track.id,
-        available: true,
-        provider: 'Internet Archive',
-        candidateTitle: String(meta?.metadata?.title || doc.title || track.title),
-        candidateArtist: String(meta?.metadata?.creator || creator || ''),
-        license: String(license),
-        downloadUrl: `https://archive.org/download/${encodeURIComponent(doc.identifier)}/${safeName}`,
-        itemUrl: `https://archive.org/details/${encodeURIComponent(doc.identifier)}`,
-        fileName: selected.name,
-        actualFormat: fileFormat(selected.name),
-        size: selected.size ? Number(selected.size) : null,
-        confidence: Math.round(((titleScore * 0.75) + (artistScore * 0.25)) * 100),
-      };
-    } catch {
-      // tenta outro candidato
-    }
+  const archive = await archiveDownload(track, preferred);
+  if (archive) {
+    return {
+      id: track.id,
+      ...archive,
+      checkedProviders,
+      alternatives: legalSearchAlternatives(track),
+    };
   }
+
+  if (process.env.JAMENDO_CLIENT_ID) checkedProviders.push('Jamendo');
+  const jamendo = await jamendoDownload(track, preferred);
+  if (jamendo) {
+    return {
+      id: track.id,
+      ...jamendo,
+      checkedProviders,
+      alternatives: legalSearchAlternatives(track),
+    };
+  }
+
+  checkedProviders.push('Apple / iTunes');
+  const store = await itunesAlternative(track);
+  const alternatives = [
+    ...(store ? [store] : []),
+    ...legalSearchAlternatives(track),
+  ];
 
   return {
     id: track.id,
     available: false,
     provider: null,
-    message: 'Nenhuma fonte aberta verificável foi encontrada para esta faixa.',
+    checkedProviders,
+    alternatives,
+    message: alternatives.length
+      ? 'Não encontrei download liberado, mas encontrei opções legais para esta gravação.'
+      : 'Nenhuma fonte legal verificável foi encontrada para esta faixa.',
   };
 }
 
@@ -191,5 +326,15 @@ export async function POST(req: Request) {
   const results = [];
   for (const track of safeTracks) results.push(await resolveOne(track, preferred));
 
-  return NextResponse.json({ ok: true, results });
+  return NextResponse.json({
+    ok: true,
+    results,
+    providerStatus: {
+      internetArchive: 'active',
+      appleItunes: 'active',
+      jamendo: process.env.JAMENDO_CLIENT_ID ? 'active' : 'needs-key',
+      bandcamp: 'search-link',
+      soundcloud: 'search-link',
+    },
+  });
 }
