@@ -2,6 +2,9 @@
 
 Hub de mídia em Next.js com interface mobile-first para análise de links e conversão de arquivos autorizados.
 
+## Demo online
+https://lumeo-media.vercel.app
+
 ## O que funciona
 - Landing page responsiva e premium
 - Detecção de origem de URL em `POST /api/analyze`
@@ -18,7 +21,7 @@ Hub de mídia em Next.js com interface mobile-first para análise de links e con
 O LUMEO não inclui mecanismos para contornar DRM, tokens, assinaturas ou restrições de download de plataformas. YouTube e Spotify são reconhecidos para fluxos permitidos de organização/análise. A conversão funciona para uploads do próprio usuário e outras mídias que ele tenha direito de processar.
 
 ## Stack
-- Next.js 16.3.3 (Active LTS em setembro de 2026)
+- Next.js 16.3.3
 - React 19.2
 - TypeScript
 - Lucide React
